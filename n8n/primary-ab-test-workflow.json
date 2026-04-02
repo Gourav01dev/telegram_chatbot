@@ -1,0 +1,682 @@
+{
+  "name": "CalorAI Primary - Telegram AB Onboarding",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "1",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1280,
+        120
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "replace-with-your-credential-id",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const m = $json.message || {};\nconst from = m.from || {};\nconst text = (m.text || '').trim();\n\nreturn [{\n  telegram_id: String(from.id || ''),\n  username: from.username || '',\n  text,\n  is_command: text.startsWith('/'),\n  text_length: text.length,\n  event_name: 'user_message_received',\n  experiment_name: 'telegram_onboarding_ab',\n  ts: new Date().toISOString()\n}];"
+      },
+      "id": "2",
+      "name": "Normalize Incoming",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1050,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/bot_events'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { telegram_id: $json.telegram_id, event_name: 'user_message_received', experiment_name: $json.experiment_name, variant: null, event_properties: { text_length: $json.text_length, has_command: $json.is_command } } }}"
+      },
+      "id": "3",
+      "name": "Log Inbound Event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -820,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/bot_users?telegram_id=eq.' + $json.telegram_id + '&select=*'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY}}"
+            }
+          ]
+        }
+      },
+      "id": "4",
+      "name": "Get Existing User",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "alwaysOutputData": true,
+      "position": [
+        -590,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const incoming = $('Normalize Incoming').first().json;\nconst rows = $input.all().map((i) => i.json);\n\n// With \"Always Output Data\" enabled, empty query results can look like [{}]\nconst hasRealUser =\n  rows.length > 0 &&\n  rows[0] &&\n  Object.keys(rows[0]).length > 0 &&\n  !!rows[0].telegram_id;\n\nconst user = hasRealUser ? rows[0] : null;\n\nreturn [{\n  ...incoming,\n  user_exists: !!user,\n  user,\n}];"
+      },
+      "id": "5",
+      "name": "Merge User Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -360,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.user_exists}}",
+              "operation": "isFalse"
+            }
+          ]
+        }
+      },
+      "id": "6",
+      "name": "Is New User?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [
+        -120,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.statsig.com/v1/check_gate",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "STATSIG-API-KEY",
+              "value": "={{$env.STATSIG_SERVER_SECRET_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { user: { userID: $json.telegram_id }, gateName: $env.STATSIG_GATE_NAME || 'telegram_onboarding_ab' } }}"
+      },
+      "id": "7",
+      "name": "Statsig Assign",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        120,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const base = $('Merge User Context').first().json;\nconst enabled = !!($json?.gateValue ?? $json?.value ?? false);\nconst variant = enabled ? 'test' : 'control';\n\nreturn [{\n  ...base,\n  variant,\n  onboarding_step: 0,\n  onboarding_completed: false\n}];"
+      },
+      "id": "8",
+      "name": "Build New User",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        350,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/bot_users?on_conflict=telegram_id'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "resolution=merge-duplicates,return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { telegram_id: $json.telegram_id, username: $json.username, experiment_name: $json.experiment_name, variant: $json.variant, onboarding_step: 0, onboarding_completed: false } }}"
+      },
+      "id": "9",
+      "name": "Insert User",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        580,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/bot_events'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { telegram_id: $json.telegram_id, event_name: 'experiment_assigned', experiment_name: $json.experiment_name, variant: $json.variant, event_properties: { source: 'statsig', gate_name: $env.STATSIG_GATE_NAME || 'telegram_onboarding_ab' } } }}"
+      },
+      "id": "10",
+      "name": "Log Assignment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        810,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $json;\n\nreturn [{\n  ...input,\n  telegram_id: input.telegram_id || input.user?.telegram_id || $('Normalize Incoming').first().json.telegram_id,\n  username: input.username || input.user?.username || $('Normalize Incoming').first().json.username || '',\n  experiment_name: input.experiment_name || input.user?.experiment_name || 'telegram_onboarding_ab',\n  variant: input.variant || input.user?.variant || 'control',\n  onboarding_step: Number(input.onboarding_step ?? input.user?.onboarding_step ?? 0),\n  onboarding_completed: !!(input.onboarding_completed ?? input.user?.onboarding_completed ?? false),\n}];"
+      },
+      "id": "11",
+      "name": "Resolve Active User",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.variant}}",
+                    "rightValue": "control",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "control"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.variant}}",
+                    "rightValue": "test",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "test"
+            }
+          ]
+        }
+      },
+      "id": "12",
+      "name": "Route Variant",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1270,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{$json.telegram_id || $('Normalize Incoming').first().json.telegram_id}}",
+        "text": "Welcome to CalorAI. Start by sending today's first meal with time, for example: 'Breakfast at 9am - Oats + Banana'."
+      },
+      "id": "13",
+      "name": "Send Control Welcome",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1500,
+        20
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "replace-with-your-credential-id",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/bot_events'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { telegram_id: $('Resolve Active User').first().json.telegram_id, event_name: 'welcome_seen', experiment_name: $('Resolve Active User').first().json.experiment_name || 'telegram_onboarding_ab', variant: 'control', event_properties: { message_type: 'generic_welcome' } } }}"
+      },
+      "id": "14",
+      "name": "Log Control Welcome",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1730,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const step = Number($json.onboarding_step || 0);\nlet message = '';\nlet nextStep = step;\nlet completed = false;\nlet eventName = 'onboarding_step_seen';\n\nif (step <= 0) {\n  message = 'Step 1/3: Welcome to CalorAI. Tell me your main health goal in one line (fat loss, maintenance, or muscle gain).';\n  nextStep = 1;\n} else if (step === 1) {\n  message = 'Step 2/3: Great. Any dietary preference? (veg, non-veg, vegan, no preference)';\n  nextStep = 2;\n} else if (step === 2) {\n  message = 'Step 3/3: What is your usual wake-up time?';\n  nextStep = 3;\n  completed = true;\n  eventName = 'onboarding_completed';\n} else {\n  message = 'Onboarding complete. Send your meal as: MealName - Time - Items';\n  nextStep = 3;\n  completed = true;\n  eventName = 'onboarding_completed';\n}\n\nreturn [{\n  ...$json,\n  onboarding_step: nextStep,\n  onboarding_completed: completed,\n  outbound_text: message,\n  onboarding_event: eventName\n}];"
+      },
+      "id": "15",
+      "name": "Build Test Onboarding",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1500,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/bot_users?telegram_id=eq.' + $json.telegram_id}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { onboarding_step: $json.onboarding_step, onboarding_completed: $json.onboarding_completed, last_active_at: new Date().toISOString() } }}"
+      },
+      "id": "16",
+      "name": "Update User Step",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1730,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/bot_events'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { telegram_id: $json.telegram_id, event_name: $json.onboarding_event, experiment_name: $json.experiment_name, variant: 'test', event_properties: { step: $json.onboarding_step } } }}"
+      },
+      "id": "17",
+      "name": "Log Test Event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1960,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{$json.telegram_id}}",
+        "text": "={{$json.outbound_text}}"
+      },
+      "id": "18",
+      "name": "Send Test Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2190,
+        220
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "replace-with-your-credential-id",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Incoming",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Incoming": {
+      "main": [
+        [
+          {
+            "node": "Log Inbound Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Inbound Event": {
+      "main": [
+        [
+          {
+            "node": "Get Existing User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Existing User": {
+      "main": [
+        [
+          {
+            "node": "Merge User Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge User Context": {
+      "main": [
+        [
+          {
+            "node": "Is New User?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is New User?": {
+      "main": [
+        [
+          {
+            "node": "Statsig Assign",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Resolve Active User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Statsig Assign": {
+      "main": [
+        [
+          {
+            "node": "Build New User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build New User": {
+      "main": [
+        [
+          {
+            "node": "Insert User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert User": {
+      "main": [
+        [
+          {
+            "node": "Log Assignment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Assignment": {
+      "main": [
+        [
+          {
+            "node": "Resolve Active User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Active User": {
+      "main": [
+        [
+          {
+            "node": "Route Variant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Variant": {
+      "main": [
+        [
+          {
+            "node": "Send Control Welcome",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Test Onboarding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Control Welcome": {
+      "main": [
+        [
+          {
+            "node": "Log Control Welcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Test Onboarding": {
+      "main": [
+        [
+          {
+            "node": "Update User Step",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update User Step": {
+      "main": [
+        [
+          {
+            "node": "Log Test Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Test Event": {
+      "main": [
+        [
+          {
+            "node": "Send Test Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "id": "calorai-primary-ab"
+}
